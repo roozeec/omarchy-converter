@@ -55,12 +55,14 @@ BarWidget {
     if (ratesProcess.running) return
     ratesProcess.force = force === true
     ratesProcess.running = true
+    ratesWatchdog.restart()
   }
 
   function refreshCrypto(force) {
     if (cryptoProcess.running) return
     cryptoProcess.force = force === true
     cryptoProcess.running = true
+    cryptoWatchdog.restart()
   }
 
   // Shape contract for shell.summon/hide/toggle routing (see Bar.findPanelWidget).
@@ -135,6 +137,22 @@ BarWidget {
     }
   }
 
+  // Hard outer deadline: a hung helper (e.g. an unreadable cache) must never
+  // occupy the shared shell indefinitely. Normal runs finish in < 1 s.
+  Timer {
+    id: ratesWatchdog
+    interval: 15000
+    repeat: false
+    onTriggered: if (ratesProcess.running) ratesProcess.kill()
+  }
+
+  Timer {
+    id: cryptoWatchdog
+    interval: 15000
+    repeat: false
+    onTriggered: if (cryptoProcess.running) cryptoProcess.kill()
+  }
+
   Process {
     id: ratesProcess
     property bool force: false
@@ -145,6 +163,7 @@ BarWidget {
       onStreamFinished: root.applyRates(text)
     }
     onExited: function(exitCode) {
+      ratesWatchdog.stop()
       if (exitCode !== 0 && root.ratesFetchedAt === 0) root.ratesStatus = "error"
     }
   }
@@ -161,15 +180,34 @@ BarWidget {
       onStreamFinished: root.applyCrypto(text)
     }
     onExited: function(exitCode) {
+      cryptoWatchdog.stop()
       if (exitCode !== 0 && root.cryptoFetchedAt === 0) root.cryptoStatus = "error"
     }
   }
 
+  // Hard caps matched by the producer-side jq filters in scripts/fetch-*
+  // (300 fiat codes, 50 coins). Anything larger means the payload came from
+  // somewhere we don't trust — drop it and keep the previously stored value.
+  readonly property int maxFiatEntries: 300
+  readonly property int maxCryptoEntries: 50
+
   function applyRates(raw) {
     try {
-      var data = JSON.parse(String(raw || "{}"))
-      if (data && data.ok && data.rates) {
-        currencyRates = data.rates
+      var rawText = String(raw || "")
+      if (rawText.length > 1048576) throw new Error("oversized payload")
+      var data = JSON.parse(rawText)
+      if (data && data.ok && data.rates && typeof data.rates === "object") {
+        var keys = Object.keys(data.rates)
+        if (keys.length > maxFiatEntries) throw new Error("too many rates")
+        var sanitized = {}
+        for (var i = 0; i < keys.length; i++) {
+          var k = keys[i]
+          if (typeof k !== "string" || k.length !== 3) continue
+          var v = data.rates[k]
+          if (typeof v !== "number" || !isFinite(v)) continue
+          sanitized[k] = v
+        }
+        currencyRates = sanitized
         ratesFetchedAt = Number(data.fetched_at || 0)
         ratesStatus = "ok"
       } else if (ratesFetchedAt === 0) {
@@ -182,9 +220,21 @@ BarWidget {
 
   function applyCrypto(raw) {
     try {
-      var data = JSON.parse(String(raw || "{}"))
-      if (data && data.ok && data.prices) {
-        cryptoPrices = data.prices
+      var rawText = String(raw || "")
+      if (rawText.length > 262144) throw new Error("oversized payload")
+      var data = JSON.parse(rawText)
+      if (data && data.ok && data.prices && typeof data.prices === "object") {
+        var keys = Object.keys(data.prices)
+        if (keys.length > maxCryptoEntries) throw new Error("too many coins")
+        var sanitized = {}
+        for (var i = 0; i < keys.length; i++) {
+          var k = keys[i]
+          var entry = data.prices[k]
+          if (!entry || typeof entry.usd !== "number" || !isFinite(entry.usd)) continue
+          var coin = { usd: entry.usd }
+          sanitized[k] = coin
+        }
+        cryptoPrices = sanitized
         cryptoFetchedAt = Number(data.fetched_at || 0)
         cryptoStatus = "ok"
       } else if (cryptoFetchedAt === 0) {

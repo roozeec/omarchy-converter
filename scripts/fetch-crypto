@@ -1,12 +1,53 @@
-#!/usr/bin/env bash
+#!/usr/bin/bash
 # Fetch crypto spot prices (USD per coin) from CoinGecko, with a disk cache.
 # Prints one JSON line: {ok, fetched_at, prices: {<id>: {usd: ...}, ...}}.
 # Usage: fetch-crypto <id,id,...> [--force]
+#
+# Hardened (in response to security/supply-chain review):
+#   * Absolute executable identities — never resolved through ambient PATH.
+#   * Bundled-helper self-check — refuse to run if $0 is not a regular file
+#     owned by the current user (or root) and not world-writable.
+#   * Cache directory is only trusted if it is NOT a symlink (mkdir -p and
+#     chmod follow symlinks, so we explicitly reject one before touching it).
+#   * Cache file is only trusted as a plain, owned, < 256 KiB regular file;
+#     symlinks/FIFOs/oversized files are rejected.
+#   * Writes go through an exclusive temporary file (mktemp creates with
+#     O_EXCL semantics) and are committed with mv -f, which calls rename(2)
+#     and never follows a symlink planted at the destination.
+#   * Producer-side schema caps: at most 50 coins, each reduced to a numeric
+#     usd — QML parses and retains a bounded object.
+#
+# Residual risk: $HOME and $XDG_CACHE_HOME (when set) are user-controlled and
+# trusted as such; an attacker already running as this user can replace
+# anything this user can.
 set -euo pipefail
 
+CURL=/usr/bin/curl
+JQ=/usr/bin/jq
+MKTEMP=/usr/bin/mktemp
+MKDIR=/usr/bin/mkdir
+DATE=/usr/bin/date
+CAT=/usr/bin/cat
+RM=/usr/bin/rm
+CHMOD=/usr/bin/chmod
+FIND=/usr/bin/find
+MV=/usr/bin/mv
+ID=/usr/bin/id
+
+me=$($ID -u)
+
+# Helper identity check: only run if we are a regular file owned by us (or
+# root) and not writable by anyone else. find -maxdepth 0 does not follow
+# symlinks, so a planted symlink fails -type f.
+if [[ -z $($FIND -- "$0" -maxdepth 0 -type f \
+            \( -user "$me" -o -user 0 \) ! -perm /o=w 2>/dev/null) ]]; then
+  printf '%s\n' '{"ok":false,"error":"helper identity"}'
+  exit 1
+fi
+
 ids=${1:-}
-if [[ ! $ids =~ ^[a-z0-9-]+(,[a-z0-9-]+)*$ ]]; then
-  echo '{"ok":false,"error":"invalid ids"}'
+if [[ ! $ids =~ ^[a-z0-9-]+(,[a-z0-9-]+)*$ ]] || ((${#ids} > 400)); then
+  printf '%s\n' '{"ok":false,"error":"invalid ids"}'
   exit 1
 fi
 
@@ -18,40 +59,68 @@ fi
 cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy/converter"
 cache_file="$cache_dir/crypto.json"
 ttl_seconds=$((10 * 60))
-mkdir -p "$cache_dir"
 
-cache_valid() {
-  [[ -s $cache_file ]] \
-    && jq -e '.ok == true and (.prices | type == "object")' "$cache_file" >/dev/null 2>&1
+# Protected directory chain: refuse a symlink at the leaf (mkdir -p and
+# chmod follow symlinks, which would silently redirect our cache elsewhere).
+if [[ -L $cache_dir ]]; then
+  printf '%s\n' '{"ok":false,"error":"untrusted cache dir"}'
+  exit 1
+fi
+$MKDIR -p -- "$cache_dir"
+$CHMOD 700 -- "$cache_dir" 2>/dev/null || true
+if [[ ! -d $cache_dir ]]; then
+  printf '%s\n' '{"ok":false,"error":"cache dir unavailable"}'
+  exit 1
+fi
+
+cache_usable() {
+  [[ -e $cache_file ]] || return 1
+  [[ -n $(
+    $FIND -- "$cache_file" -maxdepth 0 -type f -size -256k -user "$me" 2>/dev/null
+  ) ]]
 }
 
-if cache_valid; then
-  fetched=$(jq -r '.fetched_at // 0 | floor' "$cache_file")
-  now=$(date +%s)
-  if ! $force && (( now - fetched < ttl_seconds )); then
-    cat "$cache_file"
+if cache_usable; then
+  fetched=$($JQ -r '.fetched_at // 0 | floor' "$cache_file" 2>/dev/null || echo 0)
+  now=$($DATE +%s)
+  if ! $force && ((now - fetched < ttl_seconds)); then
+    $CAT -- "$cache_file"
     exit 0
   fi
 fi
 
-tmp=$(mktemp "$cache_dir/.crypto.XXXXXX")
-trap 'rm -f "$tmp"' EXIT
-encoded=$(jq -rn --arg v "$ids" '$v | @uri')
-if curl --fail --silent --show-error --connect-timeout 4 --max-time 10 \
+tmp=$($MKTEMP -- "$cache_dir/.crypto.XXXXXX")
+trap '$RM -f -- "$tmp" "$tmp.out"' EXIT
+encoded=$($JQ -rn --arg v "$ids" '$v | @uri')
+if $CURL --fail --silent --show-error --connect-timeout 4 --max-time 10 \
     --max-filesize 1048576 --proto '=https' \
-    --user-agent 'omarchy-converter/1.0' \
+    --user-agent 'roozeec.omarchy-converter/1.2' \
     "https://api.coingecko.com/api/v3/simple/price?ids=$encoded&vs_currencies=usd" -o "$tmp" \
-   && jq -e 'type == "object"' "$tmp" >/dev/null 2>&1; then
-  jq -c '{ok: true, fetched_at: (now | floor), prices: .}' "$tmp" > "$cache_file"
-  cat "$cache_file"
-  exit 0
+   && $JQ -e 'type == "object"' "$tmp" >/dev/null 2>&1; then
+  # Producer-side caps: at most 50 coins, each reduced to a numeric usd.
+  if $JQ -c '{ok: true, fetched_at: (now | floor), prices: (
+        to_entries
+        | map(select(
+            (.value | type == "object") and (.value.usd | type == "number")
+          ))
+        | .[:50]
+        | map({key: .key, value: {usd: .value.usd}})
+        | from_entries
+      )}' "$tmp" > "$tmp.out" \
+     && [[ -s $tmp.out ]]; then
+    $MV -f -- "$tmp.out" "$cache_file"  # rename(2): atomic, replaces any symlink at the target
+    trap - EXIT
+    $RM -f -- "$tmp"
+    $CAT -- "$cache_file"
+    exit 0
+  fi
 fi
 
 # A stale cache beats no data.
-if cache_valid; then
-  cat "$cache_file"
+if cache_usable; then
+  $CAT -- "$cache_file"
   exit 0
 fi
 
-echo '{"ok":false,"error":"unavailable"}'
+printf '%s\n' '{"ok":false,"error":"unavailable"}'
 exit 1
