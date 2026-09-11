@@ -38,22 +38,7 @@ currencies, crypto and units, one `⇄` click away in the bar.
 omarchy plugin add https://github.com/roozeec/omarchy-converter.git --enable --yes
 ```
 
-Or by hand — pick this only if you have reviewed the source and trust it:
-
-```
-git clone --branch v1.2.0 --depth 1 --single-branch \
-  https://github.com/roozeec/omarchy-converter.git \
-  ~/.config/omarchy/plugins/roozeec.omarchy-converter
-cd ~/.config/omarchy/plugins/roozeec.omarchy-converter
-git verify-commit HEAD   # signature on the tagged release, if you have the key
-git log --oneline -1     # confirm the commit hash before enabling
-omarchy-shell shell rescanPlugins
-omarchy plugin enable roozeec.omarchy-converter
-```
-
-The pinned tag (`v1.2.0`) and `--depth 1` mean a compromised `main` cannot
-silently swap code under an existing install; re-running with a newer tag
-(or `omarchy plugin update`) is the supported upgrade path.
+Or by hand: clone into ~/.config/omarchy/plugins/roozeec.omarchy-converter/, then omarchy-shell shell rescanPlugins and omarchy plugin enable roozeec.omarchy-converter
 
 The `⇄` widget lands in the center bar section; move it with
 `omarchy bar move roozeec.omarchy-converter --section right`.
