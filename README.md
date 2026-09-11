@@ -45,6 +45,19 @@ The `⇄` widget lands in the center bar section; move it with
 > **Note:** hot reload does not propagate to mounted bar widgets — run
 > `omarchy restart shell` after changing the code.
 
+## Uninstall
+
+```
+omarchy plugin remove roozeec.omarchy-converter
+```
+
+This removes the plugin directory and its bar entry. Optionally delete the
+cached rates too:
+
+```
+rm -rf ~/.cache/omarchy/converter
+```
+
 ## Usage
 
 Click the `⇄` bar icon (left click toggles the panel, right click forces a
