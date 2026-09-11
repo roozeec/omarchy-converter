@@ -7,8 +7,8 @@ import "Model.js" as Model
 
 Panel {
   id: root
-  moduleName: "dguillerm.omarchy-converter"
-  ipcTarget: "dguillerm.omarchy-converter"
+  moduleName: "roozeec.omarchy-converter"
+  ipcTarget: "roozeec.omarchy-converter"
   manageIpc: false
 
   property var anchorItem: null

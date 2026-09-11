@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "dguillerm.omarchy-converter",
+  "id": "roozeec.omarchy-converter",
   "name": "Converter",
   "version": "1.2.0",
-  "author": "dguillerm",
+  "author": "roozeec",
   "license": "MIT",
   "description": "Universal converter for currencies, crypto and units, with live rates.",
   "kinds": ["bar-widget"],

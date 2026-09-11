@@ -27,20 +27,20 @@ currencies, crypto and units, one `⇄` click away in the bar.
 ## Install
 
 ```
-omarchy plugin add https://github.com/dguillerm/omarchy-converter.git --enable --yes
+omarchy plugin add https://github.com/roozeec/omarchy-converter.git --enable --yes
 ```
 
 Or by hand:
 
 ```
-git clone https://github.com/dguillerm/omarchy-converter.git \
-  ~/.config/omarchy/plugins/dguillerm.omarchy-converter
+git clone https://github.com/roozeec/omarchy-converter.git \
+  ~/.config/omarchy/plugins/roozeec.omarchy-converter
 omarchy-shell shell rescanPlugins
-omarchy plugin enable dguillerm.omarchy-converter
+omarchy plugin enable roozeec.omarchy-converter
 ```
 
 The `⇄` widget lands in the center bar section; move it with
-`omarchy bar move dguillerm.omarchy-converter --section right`.
+`omarchy bar move roozeec.omarchy-converter --section right`.
 
 > **Note:** hot reload does not propagate to mounted bar widgets — run
 > `omarchy restart shell` after changing the code.
@@ -66,7 +66,7 @@ widget's layout entry:
 
 ```json
 {
-  "id": "dguillerm.omarchy-converter",
+  "id": "roozeec.omarchy-converter",
   "defaultCurrencyFrom": "EUR",
   "defaultCurrencyTo": "USD",
   "cryptoIds": "bitcoin,ethereum,solana"

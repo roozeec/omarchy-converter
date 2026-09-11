@@ -7,7 +7,7 @@ import "Model.js" as Model
 
 BarWidget {
   id: root
-  moduleName: "dguillerm.omarchy-converter"
+  moduleName: "roozeec.omarchy-converter"
 
   // Rate state, shared with the panel through hostWidget.
   property var currencyRates: ({})
