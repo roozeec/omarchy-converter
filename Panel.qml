@@ -80,7 +80,8 @@ Panel {
     var source = lastEditedSide === "bottom" ? pair.bottomInput : pair.topInput
     var target = lastEditedSide === "bottom" ? pair.topInput : pair.bottomInput
     var value = Model.parseAmount(source.text)
-    target.text = isFinite(value) ? Model.formatResult(computeConverted(value)) : ""
+    var result = isFinite(value) ? Model.formatResult(computeConverted(value)) : ""
+    target.text = result
   }
 
   function currencyOptions() {
