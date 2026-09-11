@@ -1,0 +1,56 @@
+#!/usr/bin/env bash
+# Fetch fiat exchange rates (currency units per 1 USD) from open.er-api.com,
+# with a disk cache. Prints one JSON line: {ok, base, fetched_at, rates}.
+# Usage: fetch-rates [BASE] [--force]
+set -euo pipefail
+
+base=$(printf '%s' "${1:-USD}" | tr '[:lower:]' '[:upper:]')
+if [[ ! $base =~ ^[A-Z]{3}$ ]]; then
+  echo '{"ok":false,"error":"invalid base"}'
+  exit 1
+fi
+
+force=false
+if [[ ${2:-} == "--force" ]]; then
+  force=true
+fi
+
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy/converter"
+cache_file="$cache_dir/rates-$base.json"
+ttl_seconds=$((6 * 60 * 60))
+mkdir -p "$cache_dir"
+
+cache_valid() {
+  [[ -s $cache_file ]] \
+    && jq -e '.ok == true and (.rates | type == "object")' "$cache_file" >/dev/null 2>&1
+}
+
+if cache_valid; then
+  fetched=$(jq -r '.fetched_at // 0 | floor' "$cache_file")
+  now=$(date +%s)
+  if ! $force && (( now - fetched < ttl_seconds )); then
+    cat "$cache_file"
+    exit 0
+  fi
+fi
+
+tmp=$(mktemp "$cache_dir/.rates.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+if curl --fail --silent --show-error --connect-timeout 4 --max-time 10 \
+    --max-filesize 4194304 --proto '=https' \
+    --user-agent 'omarchy-converter/1.0' \
+    "https://open.er-api.com/v6/latest/$base" -o "$tmp" \
+   && jq -e '.result == "success" and (.rates | type == "object")' "$tmp" >/dev/null 2>&1; then
+  jq -c '{ok: true, base: .base_code, fetched_at: (now | floor), rates: .rates}' "$tmp" > "$cache_file"
+  cat "$cache_file"
+  exit 0
+fi
+
+# A stale cache beats no data.
+if cache_valid; then
+  cat "$cache_file"
+  exit 0
+fi
+
+echo '{"ok":false,"error":"unavailable"}'
+exit 1

@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Fetch crypto spot prices (USD per coin) from CoinGecko, with a disk cache.
+# Prints one JSON line: {ok, fetched_at, prices: {<id>: {usd: ...}, ...}}.
+# Usage: fetch-crypto <id,id,...> [--force]
+set -euo pipefail
+
+ids=${1:-}
+if [[ ! $ids =~ ^[a-z0-9-]+(,[a-z0-9-]+)*$ ]]; then
+  echo '{"ok":false,"error":"invalid ids"}'
+  exit 1
+fi
+
+force=false
+if [[ ${2:-} == "--force" ]]; then
+  force=true
+fi
+
+cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy/converter"
+cache_file="$cache_dir/crypto.json"
+ttl_seconds=$((10 * 60))
+mkdir -p "$cache_dir"
+
+cache_valid() {
+  [[ -s $cache_file ]] \
+    && jq -e '.ok == true and (.prices | type == "object")' "$cache_file" >/dev/null 2>&1
+}
+
+if cache_valid; then
+  fetched=$(jq -r '.fetched_at // 0 | floor' "$cache_file")
+  now=$(date +%s)
+  if ! $force && (( now - fetched < ttl_seconds )); then
+    cat "$cache_file"
+    exit 0
+  fi
+fi
+
+tmp=$(mktemp "$cache_dir/.crypto.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+encoded=$(jq -rn --arg v "$ids" '$v | @uri')
+if curl --fail --silent --show-error --connect-timeout 4 --max-time 10 \
+    --max-filesize 1048576 --proto '=https' \
+    --user-agent 'omarchy-converter/1.0' \
+    "https://api.coingecko.com/api/v3/simple/price?ids=$encoded&vs_currencies=usd" -o "$tmp" \
+   && jq -e 'type == "object"' "$tmp" >/dev/null 2>&1; then
+  jq -c '{ok: true, fetched_at: (now | floor), prices: .}' "$tmp" > "$cache_file"
+  cat "$cache_file"
+  exit 0
+fi
+
+# A stale cache beats no data.
+if cache_valid; then
+  cat "$cache_file"
+  exit 0
+fi
+
+echo '{"ok":false,"error":"unavailable"}'
+exit 1

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "id": "dguillerm.omarchy-converter",
+  "name": "Converter",
+  "version": "1.2.0",
+  "author": "dguillerm",
+  "license": "MIT",
+  "description": "Universal converter for currencies, crypto and units, with live rates.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Converter",
+    "description": "Currency, crypto and unit converter with live rates.",
+    "category": "Tools",
+    "allowMultiple": false,
+    "defaultSection": "center",
+    "defaults": {
+      "defaultCurrencyFrom": "EUR",
+      "defaultCurrencyTo": "USD"
+    },
+    "schema": [
+      { "key": "defaultCurrencyFrom", "type": "string", "label": "Default source currency" },
+      { "key": "defaultCurrencyTo", "type": "string", "label": "Default target currency" },
+      { "key": "cryptoIds", "type": "string", "label": "Crypto ids (comma-separated CoinGecko ids)" }
+    ]
+  }
+}
