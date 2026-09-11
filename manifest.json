@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "roozeec.omarchy-converter",
   "name": "Converter",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": "roozeec",
   "license": "MIT",
   "description": "Universal converter for currencies, crypto and units, with live rates.",
