@@ -3,24 +3,24 @@
 # with a disk cache. Prints one JSON line: {ok, base, fetched_at, rates}.
 # Usage: fetch-rates [BASE] [--force]
 #
-# Hardened (in response to security/supply-chain review):
-#   * Absolute executable identities — never resolved through ambient PATH.
-#   * Bundled-helper self-check — refuse to run if $0 is not a regular file
-#     owned by the current user (or root) and not world-writable.
-#   * Cache directory is only trusted if it is NOT a symlink (mkdir -p and
-#     chmod follow symlinks, so we explicitly reject one before touching it).
-#   * Cache file is only trusted as a plain, owned, < 2 MiB regular file;
-#     symlinks/FIFOs/oversized files are rejected.
-#   * Writes go through an exclusive temporary file (mktemp creates with
-#     O_EXCL semantics) and are committed with mv -f, which calls rename(2)
-#     and never follows a symlink planted at the destination.
-#   * Producer-side schema caps: only 3-letter uppercase codes mapping to
-#     finite numbers, at most 300 entries — QML parses and retains a bounded
-#     object.
-#
-# Residual risk: $HOME and $XDG_CACHE_HOME (when set) are user-controlled and
-# trusted as such; an attacker already running as this user can replace
-# anything this user can.
+# Hardened:
+# - absolute executable paths; bounded reads (timeout) and bounded sizes
+# - refuses to run if this helper is not owned by the invoking user or is
+#   group/other-writable
+# - every component of the cache directory chain below $HOME must be a real
+#   directory (no symlinks), owned by this user or root, and not
+#   group/other-writable
+# - all file access happens through a retained directory FD (/proc/self/fd),
+#   so parent-directory swaps cannot redirect the leaf after validation
+# - the cache leaf must be a plain, owned, < 2 MiB regular file; writes go
+#   through a private temp file replaced with rename(2), which never follows
+#   a planted symlink
+# - emitted schema is capped (3-letter codes, numeric values, <= 300
+#   entries) so QML parses and retains a bounded object
+# Residual risk: an attacker already running as this user can replace the
+# helper or plugin files themselves; leaf swaps inside the anchored
+# directory between stat and open remain theoretically possible in bash.
+
 set -euo pipefail
 
 CURL=/usr/bin/curl
@@ -35,15 +35,14 @@ FIND=/usr/bin/find
 MV=/usr/bin/mv
 TR=/usr/bin/tr
 ID=/usr/bin/id
+STAT=/usr/bin/stat
+TIMEOUT=/usr/bin/timeout
 
-me=$($ID -u)
-
-# Helper identity check: only run if we are a regular file owned by us (or
-# root) and not writable by anyone else. find -maxdepth 0 does not follow
-# symlinks, so a planted symlink fails -type f.
-if [[ -z $($FIND -- "$0" -maxdepth 0 -type f \
-            \( -user "$me" -o -user 0 \) ! -perm /o=w 2>/dev/null) ]]; then
-  printf '%s\n' '{"ok":false,"error":"helper identity"}'
+# Refuse to run if someone else could have modified this helper: it must be
+# owned by the invoking user and not group- or other-writable.
+[[ -O $0 ]] || exit 1
+__mode=$($STAT -c '%a' "$0" 2>/dev/null) || exit 1
+if ((( 8#$__mode & 8#022 ) != 0)); then
   exit 1
 fi
 
@@ -59,65 +58,90 @@ if [[ ${2:-} == "--force" ]]; then
 fi
 
 cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/omarchy/converter"
+cache_dir=${cache_dir%/}
 cache_file="$cache_dir/rates-$base.json"
 ttl_seconds=$((6 * 60 * 60))
 
-# Protected directory chain: refuse a symlink at the leaf (mkdir -p and
-# chmod follow symlinks, which would silently redirect our cache elsewhere).
-if [[ -L $cache_dir ]]; then
-  printf '%s\n' '{"ok":false,"error":"untrusted cache dir"}'
+# Every existing component below $HOME: no symlinks, owned by this user or
+# root, not group/other-writable. $HOME itself may be a symlink.
+chain_ok() {
+  local acc="" part owner mode
+  # Split on "/" via parameter expansion; do NOT touch IFS here — it would
+  # shred every unquoted expansion below (e.g. $STAT -> "usr bin stat").
+  for part in ${cache_dir//\// }; do
+    [[ -n $part ]] || continue
+    acc="$acc/$part"
+    [[ -e $acc ]] || continue
+    if [[ $acc != "$HOME" ]]; then
+      [[ -L $acc ]] && return 1
+    fi
+    owner=$($STAT -c '%u' "$acc") || return 1
+    [[ $owner == "$($ID -u)" || $owner == 0 ]] || return 1
+    mode=$($STAT -c '%a' "$acc") || return 1
+    (( (8#$mode & 8#022) == 0 )) || return 1
+  done
+  return 0
+}
+
+unsafe() {
+  printf '%s\n' '{"ok":false,"error":"unsafe cache directory"}'
   exit 1
-fi
-$MKDIR -p -- "$cache_dir"
-$CHMOD 700 -- "$cache_dir" 2>/dev/null || true
-if [[ ! -d $cache_dir ]]; then
-  printf '%s\n' '{"ok":false,"error":"cache dir unavailable"}'
-  exit 1
-fi
+}
+
+chain_ok || unsafe
+$MKDIR -p "$cache_dir"
+$CHMOD 700 "$cache_dir"
+chain_ok || unsafe
+
+# Anchor the directory: everything below goes through this FD, so later
+# swaps of the path's parent components cannot redirect the leaf.
+exec {cfd}<"$cache_dir"
+anchored() { printf '%s' "/proc/self/fd/$cfd/$1"; }
+
+leaf=$(anchored "rates-$base.json")
 
 cache_usable() {
-  [[ -e $cache_file ]] || return 1
+  [[ -e $leaf ]] || return 1
   [[ -n $(
-    $FIND -- "$cache_file" -maxdepth 0 -type f -size -2M -user "$me" 2>/dev/null
+    $FIND "$leaf" -maxdepth 0 -type f -size -2M -user "$($ID -u)" 2>/dev/null
   ) ]]
 }
 
 if cache_usable; then
-  fetched=$($JQ -r '.fetched_at // 0 | floor' "$cache_file" 2>/dev/null || echo 0)
+  fetched=$($TIMEOUT 3 $JQ -r '.fetched_at // 0 | floor' "$leaf" 2>/dev/null || echo 0)
   now=$($DATE +%s)
   if ! $force && ((now - fetched < ttl_seconds)); then
-    $CAT -- "$cache_file"
+    $TIMEOUT 3 $CAT "$leaf"
     exit 0
   fi
 fi
 
-tmp=$($MKTEMP -- "$cache_dir/.rates.XXXXXX")
-trap '$RM -f -- "$tmp" "$tmp.out"' EXIT
+tmp=$($MKTEMP "$(anchored '.rates.XXXXXX')")
+trap '$RM -f "$tmp" "$tmp.out"' EXIT
 if $CURL --fail --silent --show-error --connect-timeout 4 --max-time 10 \
     --max-filesize 4194304 --proto '=https' \
     --user-agent 'roozeec.omarchy-converter/1.2' \
     "https://open.er-api.com/v6/latest/$base" -o "$tmp" \
-   && $JQ -e '.result == "success" and (.rates | type == "object")' "$tmp" >/dev/null 2>&1; then
-  # Producer-side caps: only 3-letter uppercase codes mapping to finite
-  # numbers, at most 300 entries.
-  if $JQ -c '{ok: true, base: .base_code, fetched_at: (now | floor), rates: (
+   && $TIMEOUT 5 $JQ -e '.result == "success" and (.rates | type == "object")' "$tmp" >/dev/null 2>&1; then
+  # Producer-side caps: only 3-letter uppercase codes mapping to numbers,
+  # at most 300 entries.
+  if $TIMEOUT 5 $JQ -c '{ok: true, base: .base_code, fetched_at: (now | floor), rates: (
         .rates | to_entries
         | map(select((.key | test("^[A-Z]{3}$")) and (.value | type == "number")))
         | .[:300]
         | from_entries
       )}' "$tmp" > "$tmp.out" \
-     && [[ -s $tmp.out ]]; then
-    $MV -f -- "$tmp.out" "$cache_file"  # rename(2): atomic, replaces any symlink at the target
-    trap - EXIT
-    $RM -f -- "$tmp"
-    $CAT -- "$cache_file"
+     && [[ -s $tmp.out ]] \
+     && $TIMEOUT 3 $JQ -e '.ok == true and (.rates | type == "object")' "$tmp.out" >/dev/null 2>&1; then
+    $MV -f "$tmp.out" "$leaf" # rename(2): atomic, replaces any symlink
+    $TIMEOUT 3 $CAT "$leaf"
     exit 0
   fi
 fi
 
 # A stale cache beats no data.
 if cache_usable; then
-  $CAT -- "$cache_file"
+  $TIMEOUT 3 $CAT "$leaf"
   exit 0
 fi
 
